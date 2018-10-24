@@ -20,7 +20,9 @@ py_library(
         "python/training/elastic_average_optimizer.py",
         "python/training/external_optimizer.py",
         "python/training/ggt.py",
+        "python/training/lars_optimizer.py",
         "python/training/lazy_adam_optimizer.py",
+        "python/training/matrix_functions.py",
         "python/training/model_average_optimizer.py",
         "python/training/moving_average_optimizer.py",
         "python/training/multitask_optimizer_wrapper.py",
@@ -157,8 +159,10 @@ py_test(
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:math_ops",
+        "//tensorflow/python:resource_variable_ops",
         "//tensorflow/python:variables",
         "//third_party/py/numpy",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
@@ -363,5 +367,35 @@ py_test(
         "//tensorflow/python:variables",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
+    ],
+)
+
+py_test(
+    name = "lars_optimizer_test",
+    srcs = ["python/training/lars_optimizer_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":opt_py",
+        "//tensorflow/python:client",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+        "@six_archive//:six",
+    ],
+)
+
+py_test(
+    name = "matrix_functions_test",
+    srcs = ["python/training/matrix_functions_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":opt_py",
+        "//tensorflow/python:client",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+        "@six_archive//:six",
     ],
 )
