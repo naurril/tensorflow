@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "llvm/IR/Module.h"
 #include "tensorflow/compiler/xla/layout_util.h"
-#include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
+#include "tensorflow/compiler/xla/service/gpu/target_util.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
@@ -38,10 +38,9 @@ namespace gpu {
 
 namespace {
 
-// Return whether the given shape is a matrix with no padding.
-bool IsRank2WithNoPadding(const Shape& shape, int64 batch_dimensions_size) {
-  return ShapeUtil::Rank(shape) == batch_dimensions_size + 2 &&
-         !LayoutUtil::IsPadded(shape);
+// Return whether the given shape is rank 2 excluding the batch dimensions.
+bool IsRank2(const Shape& shape, int64 batch_dimensions_size) {
+  return shape.rank() == batch_dimensions_size + 2;
 }
 
 // In a gemm operation where output = lhs * rhs, check whether the given shapes
@@ -55,11 +54,11 @@ bool AreValidGemmShapes(const Shape& lhs_shape, const Shape& rhs_shape,
   PrimitiveType output_primitive_type = output_shape.element_type();
   bool type_is_allowed =
       (output_primitive_type == F16 || output_primitive_type == F32 ||
-       output_primitive_type == F64 || output_primitive_type == C64);
-  return type_is_allowed &&
-         IsRank2WithNoPadding(lhs_shape, batch_dimensions_size) &&
-         IsRank2WithNoPadding(rhs_shape, batch_dimensions_size) &&
-         IsRank2WithNoPadding(output_shape, batch_dimensions_size) &&
+       output_primitive_type == F64 || output_primitive_type == C64 ||
+       output_primitive_type == C128);
+  return type_is_allowed && IsRank2(lhs_shape, batch_dimensions_size) &&
+         IsRank2(rhs_shape, batch_dimensions_size) &&
+         IsRank2(output_shape, batch_dimensions_size) &&
          !ShapeUtil::IsZeroElementArray(lhs_shape) &&
          !ShapeUtil::IsZeroElementArray(rhs_shape);
 }
@@ -83,6 +82,45 @@ bool DotImplementedAsGemm(const HloInstruction& dot) {
   }
   return false;
 }
+
+// Given a shape and a group of contiguous dimensions in the shape, returns
+// a tuple of three values (major, middle, minor), where major is the size of
+// the dimensions more major then the given dimensions, minor is the size of
+// dimensions more minor then the given dimensions, and middle is the size of
+// the given dimensions.
+std::tuple<int64, int64, int64> PartitionShapeByMiddleDimensions(
+    const Shape& shape, DimensionVector dims_middle) {
+  CHECK(LayoutUtil::AreDimensionsConsecutive(shape.layout(), dims_middle));
+
+  absl::Span<const int64> minor_to_major = LayoutUtil::MinorToMajor(shape);
+  int64 values[3] = {1, 1, 1};
+  enum Segment { kMajor = 0, kMiddle = 1, kMinor = 2 };
+  Segment cur_segment = kMinor;
+
+  // Iterate through the dimensions for the three segments in the order of
+  // minor, middle and major to accumulate the size of each segment.
+  absl::c_for_each(minor_to_major, [&](int64 cur_dim) {
+    if (cur_segment != kMajor) {
+      // Handle change of segments.
+      bool cur_dim_in_middle = absl::c_any_of(
+          dims_middle, [&](int64 dim) { return dim == cur_dim; });
+      if (cur_segment == kMinor) {
+        if (cur_dim_in_middle) {
+          cur_segment = kMiddle;
+        }
+      } else if (cur_segment == kMiddle) {
+        if (!cur_dim_in_middle) {
+          cur_segment = kMajor;
+        }
+      }
+    }
+
+    values[cur_segment] *= shape.dimensions(cur_dim);
+  });
+
+  return std::make_tuple(values[kMajor], values[kMiddle], values[kMinor]);
+}
+
 }  // namespace
 
 bool ImplementedAsGemm(const HloInstruction& hlo) {
@@ -91,9 +129,9 @@ bool ImplementedAsGemm(const HloInstruction& hlo) {
     return DotImplementedAsGemm(hlo);
   }
 
-  if (hlo.opcode() == HloOpcode::kFusion &&
-      hlo.fusion_kind() == HloInstruction::FusionKind::kOutput &&
-      hlo.fused_expression_root()->opcode() == HloOpcode::kMultiply) {
+  if (hlo.IsOutputFusion() &&
+      (hlo.fused_expression_root()->opcode() == HloOpcode::kMultiply ||
+       hlo.fused_expression_root()->opcode() == HloOpcode::kAdd)) {
     // Try to find the dot inside the output fusion node.
     const HloInstruction* dot = hlo.fused_expression_root()->operand(0);
     if (dot->opcode() != HloOpcode::kDot) {
@@ -129,6 +167,8 @@ const char* const kCudnnConvBackwardInputCallTarget =
     "__cudnn$convBackwardInput";
 const char* const kCudnnConvBackwardFilterCallTarget =
     "__cudnn$convBackwardFilter";
+const char* const kCudnnConvBiasActivationForwardCallTarget =
+    "__cudnn$convBiasActivationForward";
 
 bool IsCustomCallToDnnConvolution(const HloInstruction& hlo) {
   if (hlo.opcode() != HloOpcode::kCustomCall) {
@@ -137,7 +177,18 @@ bool IsCustomCallToDnnConvolution(const HloInstruction& hlo) {
   const auto& target = hlo.custom_call_target();
   return target == kCudnnConvForwardCallTarget ||
          target == kCudnnConvBackwardInputCallTarget ||
-         target == kCudnnConvBackwardFilterCallTarget;
+         target == kCudnnConvBackwardFilterCallTarget ||
+         target == kCudnnConvBiasActivationForwardCallTarget;
+}
+
+const char* const kCusolverCholeskyCallTarget = "__cusolver$cholesky";
+
+bool IsCustomCallToCusolver(const HloInstruction& hlo) {
+  if (hlo.opcode() != HloOpcode::kCustomCall) {
+    return false;
+  }
+  const auto& target = hlo.custom_call_target();
+  return target == kCusolverCholeskyCallTarget;
 }
 
 bool ImplementedAsLibraryCall(const HloInstruction& hlo) {
@@ -145,80 +196,91 @@ bool ImplementedAsLibraryCall(const HloInstruction& hlo) {
          IsCustomCallToDnnConvolution(hlo);
 }
 
-static HloInstruction* CreateCudnnConv(const char* call_target,
-                                       const Shape& shape, HloInstruction* lhs,
-                                       HloInstruction* rhs,
-                                       const Window& window,
-                                       const ConvolutionDimensionNumbers& dnums,
-                                       int64 feature_group_count) {
-  HloComputation* computation = lhs->parent();
-
-  // This call returns a tuple of (conv_result, scratch_memory), where
-  // conv_result is the actual result of the convolution, and scratch_memory is
-  // temporary memory used by cudnn.
-  //
-  // At the moment, we don't know how much scratch memory this conv is going to
-  // use, so we put u8[0] in this place.  Later on another pass will choose
-  // which conv algorithm to use, and at that point we'll modify the shape of
-  // this second tuple element.
-  Shape call_shape =
-      ShapeUtil::MakeTupleShape({shape, ShapeUtil::MakeShape(U8, {0})});
-
-  HloInstruction* custom_call = computation->AddInstruction(
-      HloInstruction::CreateCustomCall(call_shape, {lhs, rhs}, call_target));
-  custom_call->set_window(window);
-  custom_call->set_convolution_dimension_numbers(dnums);
-  custom_call->set_feature_group_count(feature_group_count);
-  return custom_call;
-}
-
-HloInstruction* CreateCudnnConvForward(const Shape& shape,
-                                       HloInstruction* input,
-                                       HloInstruction* kernel,
-                                       const Window& window,
-                                       const ConvolutionDimensionNumbers& dnums,
-                                       int64 feature_group_count) {
-  return CreateCudnnConv(kCudnnConvForwardCallTarget, shape, input, kernel,
-                         window, dnums, feature_group_count);
-}
-
-HloInstruction* CreateCudnnConvBackwardInput(
-    const Shape& shape, HloInstruction* output, HloInstruction* reverse_filter,
-    const Window& window, const ConvolutionDimensionNumbers& dnums,
-    int64 feature_group_count) {
-  return CreateCudnnConv(kCudnnConvBackwardInputCallTarget, shape, output,
-                         reverse_filter, window, dnums, feature_group_count);
-}
-
-HloInstruction* CreateCudnnConvBackwardFilter(
-    const Shape& shape, HloInstruction* input, HloInstruction* output,
-    const Window& window, const ConvolutionDimensionNumbers& dnums,
-    int64 feature_group_count) {
-  return CreateCudnnConv(kCudnnConvBackwardFilterCallTarget, shape, input,
-                         output, window, dnums, feature_group_count);
-}
-
-bool IsReductionToVector(const HloInstruction& reduce) {
+bool IsReductionFromOrToContiguousDimensions(const HloInstruction& reduce) {
   if (HloOpcode::kReduce != reduce.opcode()) {
     return false;
   }
+
+  // TODO(b/129698548): Remove this check after fixing the bug.
+  if (reduce.shape().element_type() == C128) {
+    return false;
+  }
+
   const HloInstruction* input = reduce.operand(0);
   std::vector<int64> dims_to_keep;
   for (int64 dim = 0; dim < input->shape().dimensions().size(); ++dim) {
-    if (!std::count(reduce.dimensions().begin(), reduce.dimensions().end(),
-                    dim)) {
+    if (!absl::c_linear_search(reduce.dimensions(), dim)) {
       dims_to_keep.push_back(dim);
     }
   }
-  return LayoutUtil::AreDimensionsConsecutive(input->shape().layout(),
-                                              dims_to_keep) &&
-         ShapeUtil::Equal(reduce.shape(), ShapeUtil::FilterDimensions(
-                                              [&dims_to_keep](int64 dim) {
-                                                return std::count(
-                                                    dims_to_keep.begin(),
-                                                    dims_to_keep.end(), dim);
-                                              },
-                                              input->shape()));
+  if (!LayoutUtil::AreDimensionsConsecutive(input->shape().layout(),
+                                            dims_to_keep) &&
+      !LayoutUtil::AreDimensionsConsecutive(input->shape().layout(),
+                                            reduce.dimensions())) {
+    return false;
+  }
+
+  bool is_row_reduction;
+  DimensionVector dims_in_elem;
+  std::tie(is_row_reduction, dims_in_elem) =
+      GetReductionKindAndContiguousComponents(input->shape(),
+                                              reduce.dimensions());
+
+  if (is_row_reduction) {
+    // For row reduction, the tile block is 1 x tile_size_x, and we are reducing
+    // along tile_size_x which needs to be large enough to make the tiling
+    // implementation efficient.
+    return dims_in_elem[2] >= kWarpSize;
+  }
+
+  // For column reduction, the tile block is tize_size_y x tile_size_x, and we
+  // are reducing along tile_size_y. Both tile_size_x and tile_size_y need to be
+  // large enough to make the tiling implementation efficient.
+  return dims_in_elem[2] >= kWarpSize && dims_in_elem[1] >= kWarpSize;
+}
+
+std::pair<bool, DimensionVector> GetReductionKindAndContiguousComponents(
+    const Shape& input_shape, absl::Span<const int64> dims_to_reduce) {
+  DimensionVector dims_to_keep;
+  for (int64 dim = 0; dim < input_shape.rank(); ++dim) {
+    if (!absl::c_linear_search(dims_to_reduce, dim)) {
+      dims_to_keep.push_back(dim);
+    }
+  }
+
+  if (dims_to_keep.empty()) {
+    return std::make_pair(
+        true, DimensionVector{1, 1, ShapeUtil::ElementsIn(input_shape)});
+  }
+
+  if (LayoutUtil::AreDimensionsConsecutive(input_shape.layout(),
+                                           dims_to_keep)) {
+    int64 num_reduced_major = 1, num_kept = 1, num_reduced_minor = 1;
+    std::tie(num_reduced_major, num_kept, num_reduced_minor) =
+        PartitionShapeByMiddleDimensions(input_shape, dims_to_keep);
+    if (num_kept == 1) {
+      return std::make_pair(
+          true, DimensionVector{1, 1, num_reduced_minor * num_reduced_major});
+    }
+    if (num_reduced_minor == 1) {
+      return std::make_pair(false,
+                            DimensionVector{1, num_reduced_major, num_kept});
+    }
+    return std::make_pair(
+        true, DimensionVector{num_reduced_major, num_kept, num_reduced_minor});
+  }
+
+  int64 num_kept_major = 1, num_reduced = 1, num_kept_minor = 1;
+  std::tie(num_kept_major, num_reduced, num_kept_minor) =
+      PartitionShapeByMiddleDimensions(
+          input_shape,
+          DimensionVector(dims_to_reduce.begin(), dims_to_reduce.end()));
+  if (num_kept_minor == 1) {
+    return std::make_pair(true,
+                          DimensionVector{1, num_kept_major, num_reduced});
+  }
+  return std::make_pair(
+      false, DimensionVector{num_kept_major, num_reduced, num_kept_minor});
 }
 
 // This emits a device-side call to
@@ -257,8 +319,8 @@ llvm::Value* EmitFullWarpShuffleDown(llvm::Value* value, llvm::Value* offset,
 
   // Special case for efficiency
   if (value->getType()->isFloatTy() && bit_width == 32) {
-    return llvm_ir::EmitCallToIntrinsic(
-        llvm::Intrinsic::nvvm_shfl_sync_down_f32,
+    return EmitCallToTargetIntrinsic(
+        TargetIntrinsicID::kShflDownF32,
         {all_warps_mask, value, offset, builder->getInt32(kWarpSize - 1)}, {},
         builder);
   }
@@ -274,8 +336,8 @@ llvm::Value* EmitFullWarpShuffleDown(llvm::Value* value, llvm::Value* offset,
   for (int i = 0; i < num_segments; ++i) {
     x = builder->CreateInsertElement(
         x,
-        llvm_ir::EmitCallToIntrinsic(
-            llvm::Intrinsic::nvvm_shfl_sync_down_i32,
+        EmitCallToTargetIntrinsic(
+            TargetIntrinsicID::kShflDownI32,
             {all_warps_mask, builder->CreateExtractElement(x, i), offset,
              builder->getInt32(kWarpSize - 1)},
             {}, builder),
@@ -288,41 +350,45 @@ llvm::Value* EmitFullWarpShuffleDown(llvm::Value* value, llvm::Value* offset,
       value->getType());
 }
 
-Status PopulateCudnnConvParams(const HloCustomCallInstruction* custom_call,
-                               CudnnConvParams* params) {
-  TF_ASSIGN_OR_RETURN(CudnnConvBackendConfig backend_config,
-                      custom_call->backend_config<CudnnConvBackendConfig>());
-  const auto& target = custom_call->custom_call_target();
-  const auto& lhs_shape = custom_call->operand(0)->shape();
-  const auto& rhs_shape = custom_call->operand(1)->shape();
-  const auto& conv_result_shape = custom_call->shape().tuple_shapes(0);
-
-  params->window = &custom_call->window();
-  params->dnums = &custom_call->convolution_dimension_numbers();
-  params->feature_group_count = custom_call->feature_group_count();
-  params->algorithm = se::dnn::AlgorithmConfig(se::dnn::AlgorithmDesc(
-      backend_config.algorithm(), backend_config.tensor_ops_enabled()));
-
+StatusOr<CudnnConvKind> GetCudnnConvKind(
+    const HloCustomCallInstruction* instr) {
+  absl::string_view target = instr->custom_call_target();
   if (target == kCudnnConvForwardCallTarget) {
-    params->kind = CudnnConvKind::kForward;
-    params->input_shape = &lhs_shape;
-    params->filter_shape = &rhs_shape;
-    params->output_shape = &conv_result_shape;
-  } else if (target == kCudnnConvBackwardInputCallTarget) {
-    params->kind = CudnnConvKind::kBackwardInput;
-    params->input_shape = &conv_result_shape;
-    params->filter_shape = &rhs_shape;
-    params->output_shape = &lhs_shape;
-  } else if (target == kCudnnConvBackwardFilterCallTarget) {
-    params->kind = CudnnConvKind::kBackwardFilter;
-    params->input_shape = &lhs_shape;
-    params->filter_shape = &conv_result_shape;
-    params->output_shape = &rhs_shape;
-  } else {
-    LOG(FATAL) << "Unexpected custom call target: "
-               << custom_call->custom_call_target();
+    return CudnnConvKind::kForward;
   }
-  return Status::OK();
+  if (target == kCudnnConvBackwardInputCallTarget) {
+    return CudnnConvKind::kBackwardInput;
+  }
+  if (target == kCudnnConvBackwardFilterCallTarget) {
+    return CudnnConvKind::kBackwardFilter;
+  }
+  if (target == kCudnnConvBiasActivationForwardCallTarget) {
+    return CudnnConvKind::kForwardActivation;
+  }
+  return InternalError("Unexpected call target: %s", target);
+}
+
+string CudnnConvKindToString(CudnnConvKind kind) {
+  switch (kind) {
+    case CudnnConvKind::kForward:
+      return "forward";
+    case CudnnConvKind::kBackwardFilter:
+      return "backward_filter";
+    case CudnnConvKind::kBackwardInput:
+      return "backward_input";
+    case CudnnConvKind::kForwardActivation:
+      return "forward with activation";
+  }
+}
+
+llvm::Value* IsBlock0Thread0(llvm::IRBuilder<>* b) {
+  return b->CreateAnd(
+      b->CreateICmpEQ(
+          b->getInt32(0),
+          EmitCallToTargetIntrinsic(TargetIntrinsicID::kThreadIdx, {}, {}, b)),
+      b->CreateICmpEQ(
+          b->getInt32(0),
+          EmitCallToTargetIntrinsic(TargetIntrinsicID::kThreadIdx, {}, {}, b)));
 }
 
 }  // namespace gpu

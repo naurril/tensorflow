@@ -15,8 +15,6 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EAGER_C_API_INTERNAL_H_
 #define TENSORFLOW_C_EAGER_C_API_INTERNAL_H_
 
-#include "tensorflow/c/eager/c_api.h"
-
 #include <algorithm>
 #include <cstddef>
 #include <map>
@@ -28,6 +26,7 @@ limitations under the License.
 
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/c_api_internal.h"
+#include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/eager/attr_builder.h"
 #include "tensorflow/core/common_runtime/eager/context.h"
@@ -50,8 +49,10 @@ limitations under the License.
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/gtl/stl_util.h"
+#include "tensorflow/core/lib/monitoring/counter.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
+#include "tensorflow/core/profiler/lib/profiler_session.h"
 #include "tensorflow/core/public/version.h"
 
 struct TFE_ContextOptions {
@@ -65,11 +66,13 @@ struct TFE_Context {
   TFE_Context(const tensorflow::SessionOptions& opts,
               TFE_ContextDevicePlacementPolicy default_policy, bool async,
               const tensorflow::DeviceMgr* device_mgr, bool device_mgr_owned,
-              tensorflow::Rendezvous* rendezvous)
+              tensorflow::Rendezvous* rendezvous,
+              const tensorflow::CustomKernelCreator* custom_kernel_creator)
       : context(opts,
                 static_cast<tensorflow::ContextDevicePlacementPolicy>(
                     default_policy),
-                async, device_mgr, device_mgr_owned, rendezvous) {}
+                async, device_mgr, device_mgr_owned, rendezvous,
+                custom_kernel_creator) {}
 
   tensorflow::EagerContext context;
 };
@@ -79,13 +82,15 @@ struct TFE_TensorHandle {
                    tensorflow::Device* op_device)
       : handle(new tensorflow::TensorHandle(t, d, op_device, nullptr)) {}
 
-  TFE_TensorHandle(tensorflow::uint64 node_id, tensorflow::DataType dtype,
-                   tensorflow::EagerContext* ctx)
-      : handle(new tensorflow::TensorHandle(node_id, dtype, ctx)) {}
-
   TFE_TensorHandle(tensorflow::TensorHandle* handle) : handle(handle) {}
 
   tensorflow::TensorHandle* handle;
+
+  // Create a symbolic tensor.
+  TFE_TensorHandle(TF_Output t, TF_DataType dtype)
+      : handle(new tensorflow::TensorHandle(
+            tensorflow::OutputGraphNode{t.oper, t.index},
+            static_cast<tensorflow::DataType>(dtype))) {}
 };
 
 struct TFE_TensorDebugInfo {
@@ -96,13 +101,62 @@ struct TFE_TensorDebugInfo {
   std::vector<tensorflow::int64> dev_dims;
 };
 
+struct TFE_OpInferenceContext {
+  explicit TFE_OpInferenceContext(const tensorflow::OpDef* op_def)
+      : op_def(op_def) {}
+
+  const tensorflow::OpDef* op_def;  // op definition from protobuf
+  int input_arg_idx = 0;  // arg definition index for the next input to be added
+  tensorflow::gtl::FlatSet<std::string> attrs;  // attributes inferred so far
+};
+
 struct TFE_Op {
-  // t is NULL iff the TFE_Op corresponds to a TensorFlow function instead of a
-  // primitive operation.
-  TFE_Op(TFE_Context* ctx, const char* op, const tensorflow::AttrTypeMap* t)
-      : operation(&ctx->context, op, t) {}
+  TFE_Op(TFE_Context* ctx, const char* op, bool is_function,
+         const tensorflow::AttrTypeMap* t,
+         TFE_OpInferenceContext* inference_ctx)
+      : operation(&ctx->context, op, is_function, t),
+        inference_ctx(inference_ctx) {}
 
   tensorflow::EagerOperation operation;
+  std::unique_ptr<TFE_OpInferenceContext> inference_ctx;
+};
+
+struct TFE_ProfilerContext {
+  tensorflow::ProfilerContext profiler_context;
+};
+
+struct TFE_Profiler {
+  TFE_Profiler(TFE_ProfilerContext* ctx) {
+    profiler = tensorflow::ProfilerSession::Create(&ctx->profiler_context);
+  }
+
+  std::unique_ptr<tensorflow::ProfilerSession> profiler;
+};
+
+struct TFE_MonitoringCounterCell {
+  tensorflow::monitoring::CounterCell cell;
+};
+
+template <int NumLabels>
+struct TFE_MonitoringCounter {
+  template <typename... LabelDesc>
+  TFE_MonitoringCounter(const char* name, const char* description,
+                        LabelDesc&&... label) {
+    counter = absl::WrapUnique(tensorflow::monitoring::Counter<NumLabels>::New(
+        name, description, label...));
+  }
+
+  std::unique_ptr<tensorflow::monitoring::Counter<NumLabels>> counter;
+};
+
+struct TFE_MonitoringCounter0 : TFE_MonitoringCounter<0> {
+  using TFE_MonitoringCounter::TFE_MonitoringCounter;
+};
+struct TFE_MonitoringCounter1 : TFE_MonitoringCounter<1> {
+  using TFE_MonitoringCounter::TFE_MonitoringCounter;
+};
+struct TFE_MonitoringCounter2 : TFE_MonitoringCounter<2> {
+  using TFE_MonitoringCounter::TFE_MonitoringCounter;
 };
 
 namespace tensorflow {
@@ -111,5 +165,25 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
                           const tensorflow::AttrValue& default_value,
                           const char* attr_name, TF_Status* status);
 }  // namespace tensorflow
+
+struct TFE_TraceContext {
+  TF_Graph* const graph;
+
+  unsigned int node_counter = 0;
+  // Each tensor handle will have its ref count incremented when it's added as a
+  // map key, and decremented when this object is destroyed.
+  std::map<tensorflow::TensorHandle*, TF_Output> input_tensor_map;
+  std::vector<std::pair<tensorflow::TensorHandle*, TF_Output>>* input_tensors =
+      nullptr;
+
+  TFE_TraceContext(TF_Graph* graph) : graph(graph) {}
+
+  ~TFE_TraceContext() {
+    delete input_tensors;
+    for (auto input : input_tensor_map) {
+      input.first->Unref();
+    }
+  }
+};
 
 #endif  // TENSORFLOW_C_EAGER_C_API_INTERNAL_H_

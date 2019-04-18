@@ -23,8 +23,8 @@ limitations under the License.
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/relu_op_functor.h"
-#include "tensorflow/core/util/cuda_kernel_helper.h"
-#include "tensorflow/core/util/cuda_launch_config.h"
+#include "tensorflow/core/util/gpu_kernel_helper.h"
+#include "tensorflow/core/util/gpu_launch_config.h"
 
 namespace tensorflow {
 
@@ -106,9 +106,9 @@ struct ReluGrad<Device, Eigen::half> {
     constexpr int32 kThreadInBlock = 512;
     CudaLaunchConfig config = GetCudaLaunchConfigFixedBlockSize(
         half2_count, d, ReluGradHalfKernel, 0, kThreadInBlock);
-    ReluGradHalfKernel<<<config.block_count, config.thread_per_block, 0,
-                         d.stream()>>>(gradient.data(), feature.data(),
-                                       backprop.data(), count);
+    TF_CHECK_OK(CudaLaunchKernel(
+        ReluGradHalfKernel, config.block_count, config.thread_per_block, 0,
+        d.stream(), gradient.data(), feature.data(), backprop.data(), count));
   }
 };
 
@@ -135,24 +135,26 @@ struct Relu<Device, qint8> {
     constexpr int32 kThreadInBlock = 512;
     CudaLaunchConfig config = GetCudaLaunchConfigFixedBlockSize(
         vect_count, d, Relu_int8x4_kernel, 0, kThreadInBlock);
-    Relu_int8x4_kernel<<<config.block_count, config.thread_per_block, 0,
-                         d.stream()>>>(
-        vect_count, reinterpret_cast<const int32*>(input.data()),
-        reinterpret_cast<int32*>(output.data()));
+    TF_CHECK_OK(CudaLaunchKernel(
+        Relu_int8x4_kernel, config.block_count, config.thread_per_block, 0,
+        d.stream(), vect_count, reinterpret_cast<const int32*>(input.data()),
+        reinterpret_cast<int32*>(output.data())));
   }
 };
 
 }  // namespace functor
 
 // Definition of the GPU implementations declared in relu_op.cc.
-#define DEFINE_GPU_KERNELS(T)                       \
-  template struct functor::Relu<GPUDevice, T>;      \
-  template struct functor::ReluGrad<GPUDevice, T>;  \
-  template struct functor::Relu6<GPUDevice, T>;     \
-  template struct functor::Relu6Grad<GPUDevice, T>; \
-  template struct functor::Elu<GPUDevice, T>;       \
-  template struct functor::EluGrad<GPUDevice, T>;   \
-  template struct functor::Selu<GPUDevice, T>;      \
+#define DEFINE_GPU_KERNELS(T)                           \
+  template struct functor::Relu<GPUDevice, T>;          \
+  template struct functor::ReluGrad<GPUDevice, T>;      \
+  template struct functor::Relu6<GPUDevice, T>;         \
+  template struct functor::Relu6Grad<GPUDevice, T>;     \
+  template struct functor::LeakyRelu<GPUDevice, T>;     \
+  template struct functor::LeakyReluGrad<GPUDevice, T>; \
+  template struct functor::Elu<GPUDevice, T>;           \
+  template struct functor::EluGrad<GPUDevice, T>;       \
+  template struct functor::Selu<GPUDevice, T>;          \
   template struct functor::SeluGrad<GPUDevice, T>;
 
 TF_CALL_GPU_NUMBER_TYPES(DEFINE_GPU_KERNELS);

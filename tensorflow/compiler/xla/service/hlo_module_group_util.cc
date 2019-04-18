@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -42,7 +42,7 @@ std::vector<HloInstruction*> HloModuleGroupUtil::GlobalPredecessors(
     HloInstruction* instruction) {
   std::vector<HloInstruction*>
       predecessors;  // Use a vector to avoid non-determinism.
-  tensorflow::gtl::FlatSet<HloInstruction*> unique;
+  absl::flat_hash_set<HloInstruction*> unique;
 
   // Adds to the unique predecessors list; if the predecessors is a companion
   // instruction, also add companion instructions; if the predecessors is a
@@ -119,7 +119,7 @@ std::vector<HloInstruction*> HloModuleGroupUtil::GlobalSuccessors(
     HloInstruction* instruction) {
   std::vector<HloInstruction*>
       successors;  // Use a vector to avoid non-determinism.
-  tensorflow::gtl::FlatSet<HloInstruction*> unique;
+  absl::flat_hash_set<HloInstruction*> unique;
 
   // Adds to the unique successors list; if the successor is a companion
   // instruction, also add companion instructions; if the successor is a
@@ -198,11 +198,41 @@ std::vector<HloInstruction*> HloModuleGroupUtil::RootInstructions(
   for (HloComputation* computation : computations) {
     for (HloInstruction* instruction : computation->instructions()) {
       if (GlobalSuccessors(instruction).empty()) {
+        // An instruction that has no successors, e.g., an unused instruction,
+        // is in roots, even though it's not the ROOT of its computation.
         roots.push_back(instruction);
       }
     }
   }
   return roots;
+}
+
+string HloModuleGroupUtil::CycleToString(HloInstruction* init_instruction) {
+  std::vector<string> names;
+  absl::flat_hash_set<HloInstruction*> seen;
+
+  std::function<bool(HloInstruction*)> helper =
+      [&](HloInstruction* instruction) {
+        if (seen.find(instruction) != seen.end()) {
+          if (instruction == init_instruction) {
+            names.push_back(instruction->name());
+            return true;
+          }
+          return false;
+        }
+        seen.insert(instruction);
+        for (HloInstruction* predecessor : GlobalPredecessors(instruction)) {
+          bool init_found = helper(predecessor);
+          if (init_found) {
+            names.push_back(instruction->name());
+            return true;
+          }
+        }
+        return false;
+      };
+
+  helper(init_instruction);
+  return absl::StrJoin(names, " --> ");
 }
 
 Status HloModuleGroupUtil::VisitTopologicalOrder(
@@ -267,22 +297,9 @@ Status HloModuleGroupUtil::VisitTopologicalOrder(
         // a cycle. Generate an error with the list of instructions in the
         // cycle.
         if ((*visit_state)[predecessor] == VisitState::kVisiting) {
-          string cyclic_instructions;
-          for (const auto& state : *visit_state) {
-            if (state.second == VisitState::kVisiting) {
-              absl::StrAppend(&cyclic_instructions, state.first->ToString(),
-                              "\n");
-            }
-          }
-          // TODO(b/64305524): Improve the error message to print out the
-          // instructions in a deterministic order that forms the cycle.
           return FailedPrecondition(
-              "Cross-computation cycle detected via communicating nodes. The "
-              "cycle contains the node %s. The cycle is found among the "
-              "following nodes. Note that the order of the nodes is arbitrary "
-              "and that the list may include nodes that are not part of the "
-              "cycle.\n%s",
-              predecessor->ToString(), cyclic_instructions);
+              "Cross-computation cycle detected via communicating nodes.\n%s",
+              CycleToString(predecessor));
         }
         stack.push(predecessor);
       }

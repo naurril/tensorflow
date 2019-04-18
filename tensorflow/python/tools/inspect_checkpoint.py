@@ -29,6 +29,13 @@ from tensorflow.python.platform import flags
 FLAGS = None
 
 
+def _count_total_params(reader):
+  """Count total number of variables."""
+  var_to_shape_map = reader.get_variable_to_shape_map()
+  var_sizes = [np.prod(var_to_shape_map[v]) for v in var_to_shape_map]
+  return np.sum(var_sizes, dtype=int)
+
+
 def print_tensors_in_checkpoint_file(file_name, tensor_name, all_tensors,
                                      all_tensor_names=False):
   """Prints tensors in a checkpoint file.
@@ -57,13 +64,16 @@ def print_tensors_in_checkpoint_file(file_name, tensor_name, all_tensors,
     else:
       print("tensor_name: ", tensor_name)
       print(reader.get_tensor(tensor_name))
+
+    # Count total number of parameters
+    print("# Total number of params: %d" % _count_total_params(reader))
   except Exception as e:  # pylint: disable=broad-except
     print(str(e))
     if "corrupted compressed block contents" in str(e):
       print("It's likely that your checkpoint file has been compressed "
             "with SNAPPY.")
     if ("Data loss" in str(e) and
-        (any([e in file_name for e in [".index", ".meta", ".data"]]))):
+        any(e in file_name for e in [".index", ".meta", ".data"])):
       proposed_file = ".".join(file_name.split(".")[0:-1])
       v2_file_error_template = """
 It's likely that this is a V2 checkpoint and you need to provide the filename

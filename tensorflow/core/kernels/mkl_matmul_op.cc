@@ -80,7 +80,7 @@ class MklMatMulOp : public OpKernel {
       return;
     }
 
-    if (a.NumElements() == 0 || b.NumElements() == 0) {
+    if (a.NumElements() == 0 && b.NumElements() == 0) {
       // If a has shape [x, 0] and b has shape [0, y], the
       // output shape is [x, y] where x and y are non-zero, so we fill
       // the output with zeros.
@@ -217,7 +217,7 @@ class MklMatMulOp : public OpKernel {
                 reinterpret_cast<const MKL_Complex16*>(b), ldb, &beta,
                 reinterpret_cast<MKL_Complex16*>(c), ldc);
   }
-#endif
+#endif  // !INTEL_MKL_DNN_ONLY
 };
 
 #define REGISTER_CPU(T)                                         \
@@ -225,6 +225,7 @@ class MklMatMulOp : public OpKernel {
       Name("MatMul").Device(DEVICE_CPU).TypeConstraint<T>("T"), \
       MklMatMulOp<CPUDevice, T, false /* cublas, ignored for CPU */>);
 
+#ifdef ENABLE_MKL
 // TODO(inteltf) Consider template specialization when adding/removing
 // additional types
 TF_CALL_float(REGISTER_CPU);
@@ -233,7 +234,8 @@ TF_CALL_float(REGISTER_CPU);
 TF_CALL_double(REGISTER_CPU);
 TF_CALL_complex64(REGISTER_CPU);
 TF_CALL_complex128(REGISTER_CPU);
-#endif
+#endif  // !INTEL_MKL_DNN_ONLY
+#endif  // ENABLE_MKL
 
 }  // namespace tensorflow
 #endif  // INTEL_MKL

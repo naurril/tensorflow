@@ -163,7 +163,6 @@ if (tensorflow_BUILD_PYTHON_TESTS)
     "${tensorflow_source_dir}/tensorflow/python/profiler/internal/*_test.py"
     "${tensorflow_source_dir}/tensorflow/python/saved_model/*_test.py"
     "${tensorflow_source_dir}/tensorflow/python/training/*_test.py"
-    "${tensorflow_source_dir}/tensorflow/contrib/coder/*_test.py"
     "${tensorflow_source_dir}/tensorflow/contrib/data/*_test.py"
     "${tensorflow_source_dir}/tensorflow/contrib/factorization/*_test.py"
     "${tensorflow_source_dir}/tensorflow/contrib/feature_column/python/feature_column/*_test.py"
@@ -183,7 +182,6 @@ if (tensorflow_BUILD_PYTHON_TESTS)
     file(GLOB_RECURSE tf_test_src_py
       ${tf_test_src_py}
       "${tensorflow_source_dir}/tensorflow/contrib/legacy_seq2seq/*_test.py"
-      "${tensorflow_source_dir}/tensorflow/contrib/linalg/*_test.py"
       "${tensorflow_source_dir}/tensorflow/contrib/graph_editor/*_test.py"
       "${tensorflow_source_dir}/tensorflow/contrib/bayesflow/*_test.py"
       "${tensorflow_source_dir}/tensorflow/contrib/framework/*_test.py"

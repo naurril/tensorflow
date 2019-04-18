@@ -51,8 +51,6 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
   def _testFreezeGraph(self, saver_write_version):
 
     checkpoint_prefix = os.path.join(self.get_temp_dir(), "saved_checkpoint")
-    checkpoint_meta_graph_file = os.path.join(self.get_temp_dir(),
-                                              "saved_checkpoint.meta")
     checkpoint_state_name = "checkpoint_state"
     input_graph_name = "input_graph.pb"
     output_graph_name = "output_graph.pb"
@@ -60,7 +58,7 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
     # We'll create an input graph that has a single variable containing 1.0,
     # and that then multiplies it by 2.
     with ops.Graph().as_default():
-      variable_node = variables.Variable(1.0, name="variable_node")
+      variable_node = variables.VariableV1(1.0, name="variable_node")
       output_node = math_ops.multiply(variable_node, 2.0, name="output_node")
       sess = session.Session()
       init = variables.global_variables_initializer()
@@ -85,7 +83,6 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
     filename_tensor_name = "save/Const:0"
     output_graph_path = os.path.join(self.get_temp_dir(), output_graph_name)
     clear_devices = False
-    input_meta_graph = checkpoint_meta_graph_file
 
     freeze_graph.freeze_graph(
         input_graph_path,
@@ -99,7 +96,7 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
         clear_devices,
         "",
         "",
-        input_meta_graph,
+        "",
         checkpoint_version=saver_write_version)
 
     # Now we make sure the variable is now a constant, and that the graph still
@@ -138,7 +135,7 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
       features = parsing_ops.parse_example(examples, feature_configs)
       feature = features[feature_name]
 
-      variable_node = variables.Variable(1.0, name="variable_node")
+      variable_node = variables.VariableV1(1.0, name="variable_node")
       scores = math_ops.multiply(variable_node, feature, name="output_node")
       class_feature = array_ops.fill(array_ops.shape(feature),
                                      "class_%s" % feature_name)
@@ -161,9 +158,11 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
             },)
         builder.save(as_text=True)
 
+  @test_util.run_v1_only("b/120545219")
   def testFreezeGraphV1(self):
     self._testFreezeGraph(saver_pb2.SaverDef.V1)
 
+  @test_util.run_v1_only("b/120545219")
   def testFreezeGraphV2(self):
     self._testFreezeGraph(saver_pb2.SaverDef.V2)
 
@@ -174,7 +173,7 @@ class FreezeGraphTest(test_util.TensorFlowTestCase):
     output_graph_filename = os.path.join(tmp_dir, "output_graph.pb")
 
     with ops.Graph().as_default():
-      variable_node = variables.Variable(1.0, name="variable_node")
+      variable_node = variables.VariableV1(1.0, name="variable_node")
       output_node = math_ops.multiply(variable_node, 2.0, name="output_node")
       sess = session.Session()
       init = variables.global_variables_initializer()

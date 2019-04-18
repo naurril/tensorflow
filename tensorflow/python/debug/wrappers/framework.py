@@ -115,6 +115,8 @@ import abc
 import re
 import threading
 
+import six
+
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.debug.lib import debug_utils
@@ -329,6 +331,7 @@ class OnRunEndResponse(object):
     pass
 
 
+@six.add_metaclass(abc.ABCMeta)
 class BaseDebugWrapperSession(session.SessionInterface):
   """Base class of debug-wrapper session classes.
 
@@ -393,7 +396,7 @@ class BaseDebugWrapperSession(session.SessionInterface):
     self._default_session_context_manager = None
 
     # A cache for callables created from CallableOptions.
-    self._cached_callables_from_options = dict()
+    self._cached_callables_from_options = {}
 
   @property
   def graph(self):
@@ -788,7 +791,6 @@ class BaseDebugWrapperSession(session.SessionInterface):
   # TODO(cais): Add _node_name_regex_whitelist and
   #   _node_op_type_regex_whitelist.
 
-  @abc.abstractmethod
   def invoke_node_stepper(self,
                           node_stepper,
                           restore_variable_values_on_exit=True):
@@ -805,6 +807,9 @@ class BaseDebugWrapperSession(session.SessionInterface):
       The same return values as the `Session.run()` call on the same fetches as
         the NodeStepper.
     """
+    raise NotImplementedError(
+        self.__class__.__name__ + " does not support node-stepper mode.")
+
 
   def should_stop(self):
     if hasattr(self._sess, "should_stop"):

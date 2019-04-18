@@ -24,7 +24,7 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "absl/types/optional.h"
 #include "tensorflow/compiler/jit/union_find.h"
-#include "tensorflow/compiler/tf2xla/dump_graph.h"
+#include "tensorflow/compiler/tf2xla/functionalize_cond.h"
 #include "tensorflow/compiler/tf2xla/functionalize_control_flow_util.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
@@ -34,6 +34,8 @@ limitations under the License.
 #include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/control_flow.h"
 #include "tensorflow/core/graph/node_builder.h"
+#include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/util/dump_graph.h"
 
 namespace tensorflow {
 namespace {
@@ -291,8 +293,7 @@ Status FunctionalizeLoop(const FunctionLibraryDefinition* lookup_library,
                          Graph* graph, Frame* frame,
                          FunctionLibraryDefinition* library) {
   VLOG(2) << "Frame " << frame->name << " before: "
-          << dump_graph::DumpGraphToFile("functionalize_before", *graph,
-                                         library);
+          << DumpGraphToFile("functionalize_before", *graph, library);
 
   // Split loop-varying Enter nodes with multiple successors. If the same
   // Tensor is fed as input to multiple loop arguments, we may end up with a
@@ -473,16 +474,23 @@ Status FunctionalizeLoop(const FunctionLibraryDefinition* lookup_library,
     }
   }
 
-  // Builds the condition and body functions.
+  // Builds the condition and body functions. Notice that we call
+  // FunctionalizeCond() on cond_graph and body_graph because we might have
+  // unfunctionalized "if" in cond_graph and body_graph. Functionalize them
+  // before they are encapsulated in FunctionDef.
   std::unique_ptr<Graph> cond_graph;
   TF_RETURN_IF_ERROR(BuildLoopCondition(*graph, frame, &cond_graph));
+  FixupSourceAndSinkEdges(cond_graph.get());
+  TF_RETURN_IF_ERROR(FunctionalizeCond(cond_graph.get(), library));
   DataTypeVector arg_types;
   std::unique_ptr<Graph> body_graph;
   TF_RETURN_IF_ERROR(BuildLoopBody(*graph, frame, &arg_types, &body_graph));
+  FixupSourceAndSinkEdges(body_graph.get());
+  TF_RETURN_IF_ERROR(FunctionalizeCond(body_graph.get(), library));
 
   VLOG(2) << "Frame " << frame->name << " condition: "
-          << dump_graph::DumpGraphToFile("loop_condition", *cond_graph, library)
-          << " body: " << dump_graph::DumpGraphToFile("loop_body", *body_graph);
+          << DumpGraphToFile("loop_condition", *cond_graph, library)
+          << " body: " << DumpGraphToFile("loop_body", *body_graph);
 
   static std::atomic<int64> sequence_num(0LL);
   int64 id = ++sequence_num;
@@ -510,10 +518,16 @@ Status FunctionalizeLoop(const FunctionLibraryDefinition* lookup_library,
 
   // Builds a While operator.
   NodeDef while_def;
-  NodeDefBuilder builder(frame->loop_cond->name(), "XlaWhile");
+  NodeDefBuilder builder(frame->loop_cond->name(), "While", library);
   builder.Attr("T", arg_types);
   builder.Attr("cond", cond_name);
   builder.Attr("body", body_name);
+  string outside_compilation;
+  if (GetNodeAttr(frame->loop_cond->def(), kXlaOutsideCompilationAttrName,
+                  &outside_compilation)
+          .ok()) {
+    builder.Attr(kXlaOutsideCompilationAttrName, outside_compilation);
+  }
   std::vector<NodeDefBuilder::NodeOut> inputs;
   for (int i = 0; i < frame->args.size(); ++i) {
     const Arg& arg = frame->args[i];
@@ -570,8 +584,7 @@ Status FunctionalizeLoop(const FunctionLibraryDefinition* lookup_library,
   frame->parent->nodes.insert(while_node);
 
   VLOG(2) << "Frame " << frame->name << " after: "
-          << dump_graph::DumpGraphToFile("functionalize_after", *graph,
-                                         library);
+          << DumpGraphToFile("functionalize_after", *graph, library);
 
   return Status::OK();
 }
@@ -653,9 +666,9 @@ Status FunctionalizeWhileLoop(const FunctionLibraryDefinition* lookup_library,
 
   // There should be no cycle at this point, since while loops have been removed
   // from graph.
-  // Check that the newly added XlaWhile nodes don't feed into themselves.
+  // Check that the newly added While nodes don't feed into themselves.
   for (const Node* node : graph->op_nodes()) {
-    if (node->def().op() == "XlaWhile") {
+    if (node->def().op() == "While") {
       TF_RETURN_WITH_CONTEXT_IF_ERROR(
           CheckNodeNotInCycle(node, graph->num_node_ids()),
           "Functionalizing loop failed.");

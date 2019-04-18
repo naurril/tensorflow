@@ -502,7 +502,10 @@ def _gen_pairs(items):
   assert len(items) % 2 == 0
   items = iter(items)
   while True:
-    yield next(items), next(items)
+    try:
+      yield next(items), next(items)
+    except StopIteration:
+      return
 
 
 class _FunctionDetail(
@@ -1479,7 +1482,7 @@ class ParserConfig(object):
     self.base_dir = base_dir
     self.defined_in_prefix = 'tensorflow/'
     self.code_url_prefix = (
-        'https://www.tensorflow.org/code/tensorflow/')  # pylint: disable=line-too-long
+        '/code/stable/tensorflow/')  # pylint: disable=line-too-long
 
   def py_name_to_object(self, full_name):
     """Return the Python object for a Python symbol name."""
@@ -1681,7 +1684,7 @@ def _get_defined_in(py_object, parser_config):
     path = path[:-1]
 
   # Never include links outside this code base.
-  if path.startswith('..'):
+  if path.startswith('..') or re.search(r'\b_api\b', path):
     return None
 
   if re.match(r'.*/gen_[^/]*\.py$', path):

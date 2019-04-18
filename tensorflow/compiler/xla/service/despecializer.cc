@@ -17,14 +17,14 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
 #include "tensorflow/compiler/xla/service/defuser.h"
-#include "tensorflow/compiler/xla/service/implicit_broadcast_remover.h"
+#include "tensorflow/compiler/xla/service/hlo_memory_scheduler.h"
 
 namespace xla {
 
 namespace {
 
 // Pass which strips control dependencies from all instructions in the module.
-class ControlDepRemover : public HloPassInterface {
+class ControlDepRemover : public HloModulePass {
  public:
   ControlDepRemover() = default;
   absl::string_view name() const override { return "control-dep-remover"; }
@@ -45,9 +45,9 @@ class ControlDepRemover : public HloPassInterface {
 
 Despecializer::Despecializer() : pipeline_("despecializer") {
   // TODO(b/70588125): Also deal with window reversal in a fast way.
+  pipeline_.AddPass<HloDescheduler>();
   pipeline_.AddPass<ControlDepRemover>();
   pipeline_.AddPass<Defuser>();
-  pipeline_.AddPass<ImplicitBroadcastRemover>();
   pipeline_.AddPass<BFloat16MixedPrecisionRemoval>();
 }
 

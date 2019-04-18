@@ -41,15 +41,13 @@ HostExecutor::~HostExecutor() {}
 
 void *HostExecutor::Allocate(uint64 size) { return new char[size]; }
 
-void *HostExecutor::AllocateSubBuffer(DeviceMemoryBase *parent,
-                                      uint64 offset_bytes, uint64 size_bytes) {
+void *HostExecutor::GetSubBuffer(DeviceMemoryBase *parent, uint64 offset_bytes,
+                                 uint64 size_bytes) {
   return reinterpret_cast<char *>(parent->opaque()) + offset_bytes;
 }
 
 void HostExecutor::Deallocate(DeviceMemoryBase *mem) {
-  if (!mem->is_sub_buffer()) {
-    delete[] static_cast<char *>(mem->opaque());
-  }
+  delete[] static_cast<char *>(mem->opaque());
 }
 
 bool HostExecutor::SynchronousMemZero(DeviceMemoryBase *location, uint64 size) {
@@ -148,8 +146,13 @@ port::Status HostExecutor::SynchronousMemcpyDeviceToDevice(
 }
 
 bool HostExecutor::HostCallback(Stream *stream,
-                                std::function<void()> callback) {
-  AsHostStream(stream)->EnqueueTask(callback);
+                                std::function<port::Status()> callback) {
+  AsHostStream(stream)->EnqueueTask([callback]() {
+    port::Status s = callback();
+    if (!s.ok()) {
+      LOG(WARNING) << "Host callback failed: " << s;
+    }
+  });
   return true;
 }
 

@@ -28,6 +28,7 @@ class BigtableLookupDatasetOp : public UnaryDatasetOpKernel {
                    DatasetBase** output) override {
     BigtableTableResource* table;
     OP_REQUIRES_OK(ctx, LookupResource(ctx, HandleFromInput(ctx, 1), &table));
+    core::ScopedUnref scoped_unref(table);
 
     std::vector<string> column_families;
     std::vector<string> columns;
@@ -151,11 +152,11 @@ class BigtableLookupDatasetOp : public UnaryDatasetOpKernel {
         }
         if (input_tensors[0].NumElements() == 1) {
           // Single key lookup.
-          ::grpc::Status status;
+          ::google::cloud::Status status;
           auto pair = dataset()->table_->table().ReadRow(
               input_tensors[0].scalar<string>()(), dataset()->filter_, status);
           if (!status.ok()) {
-            return GrpcStatusToTfStatus(status);
+            return GcpStatusToTfStatus(status);
           }
           if (!pair.first) {
             return errors::DataLoss("Row key '",

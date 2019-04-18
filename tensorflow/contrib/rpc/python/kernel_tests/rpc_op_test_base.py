@@ -22,13 +22,12 @@ import itertools
 
 import numpy as np
 
-from tensorflow.contrib.proto.python.ops import decode_proto_op
-from tensorflow.contrib.proto.python.ops import encode_proto_op
 from tensorflow.contrib.rpc.python.kernel_tests import test_example_pb2
 from tensorflow.contrib.rpc.python.ops import rpc_op
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
+from tensorflow.python.ops import proto_ops
 
 __all__ = ['I_WARNED_YOU', 'RpcOpTestBase']
 
@@ -49,7 +48,7 @@ class RpcOpTestBase(object):
     return rpc_op.try_rpc(*args, protocol=self._protocol, **kwargs)
 
   def testScalarHostPortRpc(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = (
           test_example_pb2.TestCase(values=[1, 2, 3]).SerializeToString())
       response_tensors = self.rpc(
@@ -63,7 +62,7 @@ class RpcOpTestBase(object):
     self.assertAllEqual([2, 3, 4], response_message.values)
 
   def testScalarHostPortTryRpc(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = (
           test_example_pb2.TestCase(values=[1, 2, 3]).SerializeToString())
       response_tensors, status_code, status_message = self.try_rpc(
@@ -83,7 +82,7 @@ class RpcOpTestBase(object):
     self.assertEqual(b'', status_message_values)
 
   def testEmptyHostPortRpc(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = []
       response_tensors = self.rpc(
           method=self.get_method_name('Increment'),
@@ -98,7 +97,7 @@ class RpcOpTestBase(object):
         '/InvalidService.Increment',
         self.get_method_name('InvalidMethodName')
     ]:
-      with self.test_session() as sess:
+      with self.cached_session() as sess:
         with self.assertRaisesOpError(self.invalid_method_string):
           sess.run(self.rpc(method=method, address=self._address, request=''))
 
@@ -111,7 +110,7 @@ class RpcOpTestBase(object):
   def testInvalidAddress(self):
     # This covers the case of address='' and address='localhost:293874293874'
     address = 'unix:/tmp/this_unix_socket_doesnt_exist_97820348!!@'
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with self.assertRaises(errors.UnavailableError):
         sess.run(
             self.rpc(
@@ -124,11 +123,9 @@ class RpcOpTestBase(object):
               address=address,
               request=''))
       self.assertEqual(errors.UNAVAILABLE, status_code_value)
-      self.assertTrue(
-          self.connect_failed_string in status_message_value.decode('ascii'))
 
   def testAlwaysFailingMethod(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       response_tensors = self.rpc(
           method=self.get_method_name('AlwaysFailWithInvalidArgument'),
           address=self._address,
@@ -150,7 +147,7 @@ class RpcOpTestBase(object):
       self.assertTrue(I_WARNED_YOU in status_message_value.decode('ascii'))
 
   def testSometimesFailingMethodWithManyRequests(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       # Fail hard by default.
       response_tensors = self.rpc(
           method=self.get_method_name('SometimesFailWithInvalidArgument'),
@@ -176,10 +173,12 @@ class RpcOpTestBase(object):
       expected_message_values = np.where(
           status_code_values == errors.INVALID_ARGUMENT,
           I_WARNED_YOU.encode('ascii'), b'')
-      self.assertAllEqual(expected_message_values, status_message_values)
+      for msg, expected in zip(status_message_values, expected_message_values):
+        self.assertTrue(expected in msg,
+                        '"%s" did not contain "%s"' % (msg, expected))
 
   def testVecHostPortRpc(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = [
           test_example_pb2.TestCase(
               values=[i, i + 1, i + 2]).SerializeToString() for i in range(20)
@@ -197,7 +196,7 @@ class RpcOpTestBase(object):
       self.assertAllEqual([i + 1, i + 2, i + 3], response_message.values)
 
   def testVecHostPortManyParallelRpcs(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = [
           test_example_pb2.TestCase(
               values=[i, i + 1, i + 2]).SerializeToString() for i in range(20)
@@ -219,8 +218,8 @@ class RpcOpTestBase(object):
         self.assertAllEqual([i + 1, i + 2, i + 3], response_message.values)
 
   def testVecHostPortRpcUsingEncodeAndDecodeProto(self):
-    with self.test_session() as sess:
-      request_tensors = encode_proto_op.encode_proto(
+    with self.cached_session() as sess:
+      request_tensors = proto_ops.encode_proto(
           message_type='tensorflow.contrib.rpc.TestCase',
           field_names=['values'],
           sizes=[[3]] * 20,
@@ -231,7 +230,7 @@ class RpcOpTestBase(object):
           method=self.get_method_name('Increment'),
           address=self._address,
           request=request_tensors)
-      _, (response_shape,) = decode_proto_op.decode_proto(
+      _, (response_shape,) = proto_ops.decode_proto(
           bytes=response_tensor_strings,
           message_type='tensorflow.contrib.rpc.TestCase',
           field_names=['values'],
@@ -241,7 +240,7 @@ class RpcOpTestBase(object):
                          for i in range(20)], response_shape_values)
 
   def testVecHostPortRpcCancelsUponSessionTimeOutWhenSleepingForever(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = [''] * 25  # This will launch 25 RPC requests.
       response_tensors = self.rpc(
           method=self.get_method_name('SleepForever'),
@@ -254,7 +253,7 @@ class RpcOpTestBase(object):
           sess.run(response_tensors, options=options)
 
   def testVecHostPortRpcCancelsUponConfiguredTimeOutWhenSleepingForever(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       request_tensors = [''] * 25  # This will launch 25 RPC requests.
       response_tensors = self.rpc(
           method=self.get_method_name('SleepForever'),
@@ -265,7 +264,7 @@ class RpcOpTestBase(object):
         sess.run(response_tensors)
 
   def testTryRpcPropagatesDeadlineErrorWithSometimesTimingOutRequests(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       response_tensors, status_code, status_message = self.try_rpc(
           method=self.get_method_name('SometimesSleepForever'),
           timeout_in_ms=1000,
@@ -281,7 +280,7 @@ class RpcOpTestBase(object):
 
   def testTryRpcWithMultipleAddressesSingleRequest(self):
     flatten = lambda x: list(itertools.chain.from_iterable(x))
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       addresses = flatten([[
           self._address, 'unix:/tmp/this_unix_socket_doesnt_exist_97820348!!@'
       ] for _ in range(10)])
@@ -301,7 +300,7 @@ class RpcOpTestBase(object):
 
   def testTryRpcWithMultipleMethodsSingleRequest(self):
     flatten = lambda x: list(itertools.chain.from_iterable(x))
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       methods = flatten(
           [[self.get_method_name('Increment'), 'InvalidMethodName']
            for _ in range(10)])
@@ -319,7 +318,7 @@ class RpcOpTestBase(object):
 
   def testTryRpcWithMultipleAddressesAndRequests(self):
     flatten = lambda x: list(itertools.chain.from_iterable(x))
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       addresses = flatten([[
           self._address, 'unix:/tmp/this_unix_socket_doesnt_exist_97820348!!@'
       ] for _ in range(10)])

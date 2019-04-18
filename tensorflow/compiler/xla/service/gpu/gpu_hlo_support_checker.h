@@ -20,10 +20,10 @@ limitations under the License.
 
 namespace xla {
 
-// his pass should run early in the HLO pipeline and checks for HLO constructs
+// This pass should run early in the HLO pipeline and checks for HLO constructs
 // which are not supported by the GPU backend and cannot be removed via HLO
 // transformations (eg, sparse layouts).
-class GpuHloSupportChecker : public HloPassInterface {
+class GpuHloSupportChecker : public HloModulePass {
  public:
   GpuHloSupportChecker() = default;
   ~GpuHloSupportChecker() override = default;

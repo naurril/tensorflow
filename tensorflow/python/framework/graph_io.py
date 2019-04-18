@@ -27,7 +27,7 @@ from tensorflow.python.lib.io import file_io
 from tensorflow.python.util.tf_export import tf_export
 
 
-@tf_export('train.write_graph')
+@tf_export('io.write_graph', v1=['io.write_graph', 'train.write_graph'])
 def write_graph(graph_or_graph_def, logdir, name, as_text=True):
   """Writes a graph proto to a file.
 
@@ -35,16 +35,16 @@ def write_graph(graph_or_graph_def, logdir, name, as_text=True):
 
   ```python
   v = tf.Variable(0, name='my_variable')
-  sess = tf.Session()
-  tf.train.write_graph(sess.graph_def, '/tmp/my-model', 'train.pbtxt')
+  sess = tf.compat.v1.Session()
+  tf.io.write_graph(sess.graph_def, '/tmp/my-model', 'train.pbtxt')
   ```
 
   or
 
   ```python
   v = tf.Variable(0, name='my_variable')
-  sess = tf.Session()
-  tf.train.write_graph(sess.graph, '/tmp/my-model', 'train.pbtxt')
+  sess = tf.compat.v1.Session()
+  tf.io.write_graph(sess.graph, '/tmp/my-model', 'train.pbtxt')
   ```
 
   Args:
